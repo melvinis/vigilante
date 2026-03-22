@@ -156,36 +156,47 @@ function detectChain(a){
 // ═══════════════════════════════════════════════════════════════════════════
 async function fetchOFAC(push) {
   if(Date.now()-OFAC_LIVE.lastFetch<3600000&&OFAC_LIVE.lastFetch>0)return;
-  try{
-    push&&push("Fetching OFAC SDN live feed…");
-    const url="https://api.allorigins.win/raw?url="+encodeURIComponent("https://www.treasury.gov/ofac/downloads/sdn.xml");
-    const res=await fetch(url,{signal:AbortSignal.timeout(10000)});
-    if(!res.ok)throw new Error(`HTTP ${res.status}`);
-    const doc=new DOMParser().parseFromString(await res.text(),"text/xml");
-    let count=0;
-    doc.querySelectorAll("sdnEntry").forEach(entry=>{
-      const name=entry.querySelector("lastName")?.textContent||"SDN";
-      entry.querySelectorAll("id").forEach(id=>{
-        const type=id.querySelector("idType")?.textContent||"";
-        const num=id.querySelector("idNumber")?.textContent?.trim();
-        if(num&&(type.includes("Digital")||type.includes("Crypto")||type.includes("ETH")||type.includes("XBT")||type.includes("Bitcoin"))){
-          const e2={label:`OFAC SDN: ${name}`,risk:100,cat:"SANCTIONS",source:"OFAC_LIVE"};
-          OFAC_LIVE.addresses[num.toLowerCase()]=e2;OFAC_LIVE.addresses[num]=e2;count++;
+  const SDN_URL="https://www.treasury.gov/ofac/downloads/sdnlist.txt";
+  const proxies=[
+    {name:"corsproxy.io",  fn:(u)=>`https://corsproxy.io/?${encodeURIComponent(u)}`},
+    {name:"allorigins",    fn:(u)=>`https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`},
+    {name:"thingproxy",    fn:(u)=>`https://thingproxy.freeboard.io/fetch/${u}`},
+  ];
+  push&&push("Fetching OFAC SDN live feed…");
+  for(let i=0;i<proxies.length;i++){
+    const {name,fn}=proxies[i];
+    try{
+      push&&push(`  → ${name}…`);
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),45000);
+      const res=await fetch(fn(SDN_URL),{signal:controller.signal});
+      clearTimeout(timer);
+      if(!res.ok)throw new Error(`HTTP ${res.status}`);
+      const text=await res.text();
+      let count=0;
+      let currentName="SDN Entity";
+      const lines=text.split("\n");
+      for(const line of lines){
+        const t=line.trim();
+        if(/^\d+\./.test(t))currentName=t.replace(/^\d+\.\s*/,"").split(";")[0].trim().slice(0,60);
+        if(/Digital Currency Address|XBT Address|ETH Address/i.test(t)){
+          const m=t.match(/(?:Address\s*-\s*[A-Z]+:\s*)([A-Za-z0-9]{20,})/i);
+          if(m&&m[1]){
+            const addr=m[1].trim().replace(/[;.,]$/,"");
+            const e2={label:`OFAC SDN: ${currentName}`,risk:100,cat:"SANCTIONS",source:"OFAC_LIVE"};
+            OFAC_LIVE.addresses[addr.toLowerCase()]=e2;
+            OFAC_LIVE.addresses[addr]=e2;
+            count++;
+          }
         }
-      });
-    });
-    OFAC_LIVE.lastFetch=Date.now();OFAC_LIVE.count=count;OFAC_LIVE.status="ok";
-    push&&push(`✓ OFAC: ${count} addresses loaded`);
-  }catch(e){OFAC_LIVE.status="error";push&&push(`⚠ OFAC unavailable: ${e.message}`);}
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BLOCKCHAIN FETCHERS
-// ═══════════════════════════════════════════════════════════════════════════
-async function withFallback(fns,push){
-  for(let i=0;i<fns.length;i++){
-    try{push&&push(`  → ${fns[i].name}${i>0?" (fallback)":""}`);const r=await fns[i].fn();return{...r,_src:fns[i].name};}
-    catch(e){push&&push(`  ✗ ${fns[i].name}: ${e.message}`);if(i===fns.length-1)throw e;}
+      }
+      OFAC_LIVE.lastFetch=Date.now();OFAC_LIVE.count=count;OFAC_LIVE.status="ok";
+      push&&push(`✓ OFAC loaded via ${name}: ${count} crypto addresses`);
+      return;
+    }catch(e){
+      push&&push(`  ✗ ${name}: ${e.message}`);
+      if(i===proxies.length-1){OFAC_LIVE.status="static";push&&push("⚠ OFAC live feed unavailable — static baseline active");}
+    }
   }
 }
 async function fetchBTC(addr,push){return withFallback([{name:"Blockstream",fn:()=>_btcBS(addr)},{name:"Mempool.space",fn:()=>_btcMP(addr)}],push);}
