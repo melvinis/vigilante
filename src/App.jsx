@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
+// reportGenerator loaded dynamically to keep initial bundle small
 
 const T = {
   bg:"#05080E",surface:"#090D18",panel:"#0C1220",card:"#0F1628",
@@ -528,6 +529,8 @@ export default function App(){
   const [compareA,setCompareA]=useState(null);
   const [compareB,setCompareB]=useState(null);
   const [syncStatus,setSyncStatus]=useState("idle");
+  const [reportLoading,setReportLoading]=useState(false);
+  const [reportError,setReportError]=useState("");
   const [ofacStatus,setOfacStatus]=useState("idle");
   const [showMeta,setShowMeta]=useState(false);
   const [metaAddress,setMetaAddress]=useState(null);
@@ -649,6 +652,49 @@ export default function App(){
       rows.push([e.scanned_at,e.address,e.chain,e.overall_score,e.risk_level,e.entity,e.decision,e.balance,e.tx_count,e.scanned_by_email||"",e.score_delta||0,m?.owner_name||"",m?.wallet_reference||"",m?.entity_type||"",m?.jurisdiction||""]);
     });
     const el=document.createElement("a");el.href=URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"}));el.download=`vigilante_aml_${Date.now()}.csv`;el.click();
+  };
+
+  // ── Report generation ──
+  const generateReport = async(scanData, format="both") => {
+    if(!scanData) return;
+    setReportLoading(true); setReportError("");
+    try {
+      const { generatePDF, generateDOCX, downloadBlob, reportFilename } = await import("./reportGenerator.js");
+      // Fetch KYC metadata for this wallet
+      const kyc = await loadMetadata(scanData.address).catch(()=>null);
+      // Fetch scan history
+      let history = [];
+      if(sb.isConfigured()&&sb.token){
+        history = await sb.select("wallet_scans",{filter:{address:(scanData.address||"").toLowerCase()},order:"scanned_at.desc",limit:50}).catch(()=>[]);
+      }
+      // Fetch change log
+      let changesLog = [];
+      if(sb.isConfigured()&&sb.token){
+        changesLog = await sb.select("scan_changes",{filter:{address:(scanData.address||"").toLowerCase()},order:"created_at.desc",limit:100}).catch(()=>[]);
+      }
+      // Normalise scan data (handle both live result and Supabase row shapes)
+      const normalised = {
+        ...scanData,
+        overall_score: scanData.overall_score ?? scanData.overallScore ?? 0,
+        tx_count: scanData.tx_count ?? scanData.txCount ?? 0,
+        first_seen: scanData.first_seen ?? scanData.firstSeen ?? "Unknown",
+        hop_node_count: scanData.hop_node_count ?? scanData.hopNodeCount ?? 0,
+        counterparties: scanData.counterparties || [],
+        signals: scanData.signals || {},
+      };
+      if(format==="pdf"||format==="both"){
+        const pdfData = await generatePDF(normalised, kyc, history, changesLog);
+        downloadBlob(pdfData, reportFilename(normalised,"pdf"), "application/pdf");
+      }
+      if(format==="docx"||format==="both"){
+        const docxData = await generateDOCX(normalised, kyc, history, changesLog);
+        downloadBlob(docxData, reportFilename(normalised,"docx"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+      }
+    } catch(e) {
+      console.error("Report generation failed:", e);
+      setReportError("Report generation failed: " + e.message);
+    }
+    setReportLoading(false);
   };
 
   const decCol=result?(result.decision==="ACCEPT"?T.green:result.decision==="REVIEW"?T.yellow:T.red):T.mid;
@@ -830,6 +876,14 @@ export default function App(){
                     <button onClick={()=>openMeta(result.address)} style={{flex:1,padding:"6px",borderRadius:4,background:`${T.teal}15`,border:`1px solid ${T.teal}40`,color:T.teal,fontSize:9,fontFamily:T.mono,cursor:"pointer",letterSpacing:"0.1em"}}>📋 {walletMeta?"EDIT KYC":"ADD KYC"}</button>
                     <button onClick={()=>openHistory(result.address)} style={{flex:1,padding:"6px",borderRadius:4,background:`${T.purple}15`,border:`1px solid ${T.purple}40`,color:T.purple,fontSize:9,fontFamily:T.mono,cursor:"pointer",letterSpacing:"0.1em"}}>HISTORY →</button>
                   </div>
+                  <div style={{marginTop:8,display:"flex",gap:6}}>
+                    <button onClick={()=>generateReport(result,"pdf")} disabled={reportLoading} style={{flex:1,padding:"6px",borderRadius:4,background:`${T.red}15`,border:`1px solid ${T.red}40`,color:T.red,fontSize:9,fontFamily:T.mono,cursor:reportLoading?"not-allowed":"pointer",letterSpacing:"0.1em"}}>{reportLoading?"GENERATING…":"⬇ PDF REPORT"}</button>
+                    <button onClick={()=>generateReport(result,"docx")} disabled={reportLoading} style={{flex:1,padding:"6px",borderRadius:4,background:`${T.orange}15`,border:`1px solid ${T.orange}40`,color:T.orange,fontSize:9,fontFamily:T.mono,cursor:reportLoading?"not-allowed":"pointer",letterSpacing:"0.1em"}}>{reportLoading?"…":"⬇ WORD REPORT"}</button>
+                  </div>
+                  <div style={{marginTop:6}}>
+                    <button onClick={()=>generateReport(result,"both")} disabled={reportLoading} style={{width:"100%",padding:"6px",borderRadius:4,background:`${T.green}15`,border:`1px solid ${T.green}40`,color:T.green,fontSize:9,fontFamily:T.mono,cursor:reportLoading?"not-allowed":"pointer",letterSpacing:"0.1em"}}>{reportLoading?"GENERATING…":"⬇ DOWNLOAD BOTH FORMATS"}</button>
+                  </div>
+                  {reportError&&<div style={{marginTop:5,fontSize:8.5,color:T.red}}>{reportError}</div>}
                 </div>
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
@@ -889,6 +943,7 @@ export default function App(){
                   </div>
                   <div style={{display:"flex",gap:6,alignItems:"center"}}>
                     {(role==="admin"||role==="analyst")&&<button onClick={e=>{e.stopPropagation();openMeta(w.address);}} style={{fontSize:8,background:`${T.teal}15`,border:`1px solid ${T.teal}30`,color:T.teal,padding:"3px 7px",borderRadius:3,cursor:"pointer",fontFamily:T.mono}}>KYC</button>}
+                    <button onClick={e=>{e.stopPropagation();generateReport(w,"both");}} disabled={reportLoading} style={{fontSize:8,background:`${T.green}10`,border:`1px solid ${T.green}30`,color:T.green,padding:"3px 7px",borderRadius:3,cursor:"pointer",fontFamily:T.mono}}>⬇ REPORT</button>
                     <StatusChip flag={w.status_flag||"STABLE"}/>
                   </div>
                 </div>
@@ -979,6 +1034,8 @@ export default function App(){
                     <div style={{display:"flex",gap:8,alignItems:"center"}}>
                       {(scan.score_delta||0)!==0&&<span style={{fontSize:9,color:(scan.score_delta||0)>0?T.red:T.green,fontFamily:T.mono,fontWeight:700}}>{(scan.score_delta||0)>0?`▲ +${scan.score_delta}`:` ▼ ${scan.score_delta}`}</span>}
                       <button onClick={()=>{setCompareA(scan);setCompareB(walletScans[i+1]||null);setHistoryTab("compare");}} style={{fontSize:8,background:"transparent",border:`1px solid ${T.border}`,color:T.mid,padding:"3px 8px",borderRadius:3,cursor:"pointer",fontFamily:T.mono}}>COMPARE</button>
+                      <button onClick={()=>generateReport(scan,"pdf")} disabled={reportLoading} style={{fontSize:8,background:`${T.red}10`,border:`1px solid ${T.red}30`,color:T.red,padding:"3px 8px",borderRadius:3,cursor:"pointer",fontFamily:T.mono}}>PDF</button>
+                      <button onClick={()=>generateReport(scan,"docx")} disabled={reportLoading} style={{fontSize:8,background:`${T.orange}10`,border:`1px solid ${T.orange}30`,color:T.orange,padding:"3px 8px",borderRadius:3,cursor:"pointer",fontFamily:T.mono}}>DOCX</button>
                     </div>
                   </div>
                   <div style={{padding:"12px 16px",display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
