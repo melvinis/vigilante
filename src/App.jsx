@@ -505,14 +505,24 @@ export default function App(){
       const hash=window.location.hash;
       if(hash){const p=new URLSearchParams(hash.replace("#",""));const type=p.get("type");const tok=p.get("access_token");if(tok&&(type==="invite"||type==="recovery")){setInviteToken(tok);window.history.replaceState(null,"",window.location.pathname);return;}}
       const sess=ls.get("sbSession");
-      if(sess){try{const ref=await sb.refresh(sess.refreshToken);sb.token=ref.access_token;setUser(sess.user);ls.set("sbSession",{...sess,token:ref.access_token});await loadRole(sess.user);}catch{ls.del("sbSession");}}
+      if(sess){try{const ref=await sb.refresh(sess.refreshToken);sb.token=ref.access_token;setUser(sess.user);ls.set("sbSession",{...sess,token:ref.access_token});await loadRole(sess.user,ref.access_token);}catch{ls.del("sbSession");}}
       setOfacStatus("loading");await fetchOFAC(push);setOfacStatus(OFAC.status);
     })();
   },[]);
 
-  const loadRole=async(u)=>{
-    try{const r=await sb.rpc("get_my_role");setRole(r||"junior_analyst");}
-    catch{setRole("junior_analyst");}
+  const loadRole=async(u, tokenOverride)=>{
+    if(!sb.isConfigured())return;
+    if(tokenOverride) sb.token=tokenOverride;
+    if(!sb.token)return;
+    try{
+      const rows=await sb.select("user_roles",{filter:{user_id:u?.id}});
+      const r=rows?.[0]?.role;
+      setRole(r||"junior_analyst");
+      if(!r) console.warn("No role found for",u?.id,"— check user_roles table in Supabase");
+    }catch(e){
+      console.error("loadRole failed:",e.message);
+      setRole("junior_analyst");
+    }
   };
 
   useEffect(()=>{if(user){refreshRegistry();};},[user,role]);
@@ -531,7 +541,7 @@ export default function App(){
     try{
       const{user:u,token,refreshToken}=await sb.signIn(loginEmail,loginPwd);
       sb.token=token;setUser(u);ls.set("sbSession",{user:u,token,refreshToken});
-      await loadRole(u);
+      await loadRole(u,token);
     }catch(e){setLoginErr(e.message);}
     setLoginLoading(false);
   };
