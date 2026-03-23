@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-import { generatePDF, generateDOCX, downloadBlob, reportFilename } from "./reportGenerator.js";
+// Report generator loaded on demand (see generateReport function)
 
 const T = {
   bg:"#05080E",surface:"#090D18",panel:"#0C1220",card:"#0F1628",
@@ -659,6 +659,7 @@ export default function App(){
     if(!scanData){ setReportError("No scan data available"); return; }
     setReportLoading(true); setReportError("");
     try {
+      const { generatePDF, generateDOCX, downloadBlob, reportFilename } = await import("./reportGenerator.js");
       // Fetch KYC metadata for this wallet
       const kyc = await loadMetadata(scanData.address).catch(()=>null);
       // Fetch scan history
