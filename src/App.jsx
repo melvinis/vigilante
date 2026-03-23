@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from "react";
-// reportGenerator loaded dynamically to keep initial bundle small
+import { generatePDF, generateDOCX, downloadBlob, reportFilename } from "./reportGenerator.js";
 
 const T = {
   bg:"#05080E",surface:"#090D18",panel:"#0C1220",card:"#0F1628",
@@ -656,10 +656,9 @@ export default function App(){
 
   // ── Report generation ──
   const generateReport = async(scanData, format="both") => {
-    if(!scanData) return;
+    if(!scanData){ setReportError("No scan data available"); return; }
     setReportLoading(true); setReportError("");
     try {
-      const { generatePDF, generateDOCX, downloadBlob, reportFilename } = await import("./reportGenerator.js");
       // Fetch KYC metadata for this wallet
       const kyc = await loadMetadata(scanData.address).catch(()=>null);
       // Fetch scan history
@@ -883,7 +882,7 @@ export default function App(){
                   <div style={{marginTop:6}}>
                     <button onClick={()=>generateReport(result,"both")} disabled={reportLoading} style={{width:"100%",padding:"6px",borderRadius:4,background:`${T.green}15`,border:`1px solid ${T.green}40`,color:T.green,fontSize:9,fontFamily:T.mono,cursor:reportLoading?"not-allowed":"pointer",letterSpacing:"0.1em"}}>{reportLoading?"GENERATING…":"⬇ DOWNLOAD BOTH FORMATS"}</button>
                   </div>
-                  {reportError&&<div style={{marginTop:5,fontSize:8.5,color:T.red}}>{reportError}</div>}
+                  {reportError&&<div style={{marginTop:6,padding:"6px 10px",background:`${T.red}15`,border:`1px solid ${T.red}40`,borderRadius:4,fontSize:8.5,color:T.red,wordBreak:"break-all"}}>{reportError}</div>}
                 </div>
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:14}}>
