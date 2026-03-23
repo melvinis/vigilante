@@ -143,7 +143,36 @@ async function withFallback(fns,push){
 async function fetchBTC(addr,push){return withFallback([{name:"Blockstream",fn:()=>_btcBS(addr)},{name:"Mempool.space",fn:()=>_btcMP(addr)}],push);}
 async function fetchETH(addr,key,push){return withFallback([{name:"Etherscan",fn:()=>_ethES(addr,key)},{name:"Blockscout",fn:()=>_ethBC(addr)}],push);}
 async function fetchTRX(addr,push){return withFallback([{name:"Tronscan",fn:()=>_trxTS(addr)},{name:"TronGrid",fn:()=>_trxTG(addr)}],push);}
-async function fetchSOL(addr,push){return withFallback([{name:"Solana RPC",fn:()=>_solRPC(addr,"https://api.mainnet-beta.solana.com")},{name:"Solana Ankr",fn:()=>_solRPC(addr,"https://rpc.ankr.com/solana")}],push);}
+async function fetchSOL(addr,push,solscanKey){
+  return withFallback([
+    // Solscan REST API — better data, requires free key
+    ...(solscanKey?[{name:"Solscan",fn:()=>_solSolscan(addr,solscanKey)}]:[]),
+    {name:"Solana RPC",fn:()=>_solRPC(addr,"https://api.mainnet-beta.solana.com")},
+    {name:"Solana Ankr",fn:()=>_solRPC(addr,"https://rpc.ankr.com/solana")},
+  ],push);
+}
+
+async function _solSolscan(addr,key){
+  const headers={"token":key,"Accept":"application/json"};
+  const [accR,txR]=await Promise.all([
+    fetch(`https://pro-api.solscan.io/v2.0/account/${addr}`,{headers,signal:AbortSignal.timeout(8000)}),
+    fetch(`https://pro-api.solscan.io/v2.0/account/transactions?address=${addr}&limit=20`,{headers,signal:AbortSignal.timeout(8000)}),
+  ]);
+  if(!accR.ok)throw new Error(`Solscan HTTP ${accR.status}`);
+  const ad=await accR.json(),txd=txR.ok?await txR.json():{data:[]};
+  const txs=txd.data||[];
+  const cps=[];const seen=new Set();
+  for(const tx of txs.slice(0,15)){
+    const peers=[tx.signer,...(tx.tokenTransfers||[]).map(t=>t.sourceOwner||t.destinationOwner)].filter(Boolean);
+    for(const p of peers){
+      if(p===addr||seen.has(p))continue;seen.add(p);
+      const k=lookupAll(p);
+      cps.push({address:p,amount:"—",label:k?.label||"Unknown",cat:k?.cat||"WALLET",knownRisk:k?.risk??null,direction:"—",hop:0});
+    }
+  }
+  const balance=((ad.data?.lamports||0)/1e9).toFixed(6)+" SOL";
+  return{balance,txCount:ad.data?.txCount||txs.length,firstSeen:"Unknown",counterparties:cps,tokenActivity:[],coSpendCount:0,changeAddresses:[]};
+}
 
 async function _btcBS(addr){const[aR,tR]=await Promise.all([fetch(`https://blockstream.info/api/address/${addr}`,{signal:AbortSignal.timeout(8000)}),fetch(`https://blockstream.info/api/address/${addr}/txs`,{signal:AbortSignal.timeout(8000)})]);if(!aR.ok)throw new Error(`HTTP ${aR.status}`);return _parseBTC(addr,await aR.json(),tR.ok?await tR.json():[]);}
 async function _btcMP(addr){const[aR,tR]=await Promise.all([fetch(`https://mempool.space/api/address/${addr}`,{signal:AbortSignal.timeout(8000)}),fetch(`https://mempool.space/api/address/${addr}/txs`,{signal:AbortSignal.timeout(8000)})]);if(!aR.ok)throw new Error(`HTTP ${aR.status}`);return _parseBTC(addr,await aR.json(),tR.ok?await tR.json():[]);}
@@ -364,6 +393,27 @@ function DiffRow({change,i}){
   </div>;
 }
 
+// ── MetadataField — defined OUTSIDE MetadataPanel to prevent focus loss ────────
+function MetadataField({label,k,type="text",options=null,half=false,data,setData,canEdit}){
+  return(
+    <div style={{marginBottom:12,width:half?"calc(50% - 6px)":"100%"}}>
+      <div style={{fontSize:8.5,color:T.mid,marginBottom:4,letterSpacing:"0.1em"}}>{label}</div>
+      {options?(
+        <select value={data[k]} onChange={e=>setData(p=>({...p,[k]:e.target.value}))} disabled={!canEdit}
+          style={{width:"100%",background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 10px",color:data[k]?T.text:T.dim,fontSize:11,fontFamily:T.mono,outline:"none",cursor:canEdit?"pointer":"default",opacity:canEdit?1:0.6}}>
+          <option value="">— select —</option>
+          {options.map(o=><option key={o} value={o}>{o}</option>)}
+        </select>
+      ):(
+        <input type={type} value={data[k]} onChange={e=>setData(p=>({...p,[k]:e.target.value}))} disabled={!canEdit}
+          placeholder={canEdit?"Enter "+label.toLowerCase():"—"}
+          style={{width:"100%",background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 10px",color:T.text,fontSize:11,fontFamily:T.mono,outline:"none",boxSizing:"border-box",opacity:canEdit?1:0.6}}
+          onFocus={e=>{if(canEdit)e.target.style.borderColor=T.accent;}} onBlur={e=>e.target.style.borderColor=T.border}/>
+      )}
+    </div>
+  );
+}
+
 // ── Metadata Panel ────────────────────────────────────────────────────────────
 function MetadataPanel({address,user,role,onClose,onSaved}){
   const [data,setData]=useState({owner_name:"",wallet_reference:"",entity_type:"",jurisdiction:"",id_reference:"",relationship_manager:"",risk_classification:"",contact_number:"",contact_email:"",notes:""});
@@ -390,23 +440,7 @@ function MetadataPanel({address,user,role,onClose,onSaved}){
     setSaving(false);
   };
 
-  const F=({label,k,type="text",options=null,half=false})=>(
-    <div style={{marginBottom:12,width:half?"calc(50% - 6px)":"100%"}}>
-      <div style={{fontSize:8.5,color:T.mid,marginBottom:4,letterSpacing:"0.1em"}}>{label}</div>
-      {options?(
-        <select value={data[k]} onChange={e=>setData(p=>({...p,[k]:e.target.value}))} disabled={!canEdit}
-          style={{width:"100%",background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 10px",color:data[k]?T.text:T.dim,fontSize:11,fontFamily:T.mono,outline:"none",cursor:canEdit?"pointer":"default",opacity:canEdit?1:0.6}}>
-          <option value="">— select —</option>
-          {options.map(o=><option key={o} value={o}>{o}</option>)}
-        </select>
-      ):(
-        <input type={type} value={data[k]} onChange={e=>setData(p=>({...p,[k]:e.target.value}))} disabled={!canEdit}
-          placeholder={canEdit?"Enter "+label.toLowerCase():"—"}
-          style={{width:"100%",background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 10px",color:T.text,fontSize:11,fontFamily:T.mono,outline:"none",boxSizing:"border-box",opacity:canEdit?1:0.6}}
-          onFocus={e=>{if(canEdit)e.target.style.borderColor=T.accent;}} onBlur={e=>e.target.style.borderColor=T.border}/>
-      )}
-    </div>
-  );
+
 
   return(
     <div style={{position:"fixed",top:0,right:0,width:420,height:"100vh",background:T.surface,borderLeft:`1px solid ${T.border}`,zIndex:100,display:"flex",flexDirection:"column",boxShadow:"-8px 0 32px #000A"}}>
@@ -423,17 +457,17 @@ function MetadataPanel({address,user,role,onClose,onSaved}){
         <div style={{flex:1,overflow:"auto",padding:20}}>
           {!canEdit&&<div style={{marginBottom:16,padding:"8px 12px",background:`${T.yellow}10`,border:`1px solid ${T.yellow}30`,borderRadius:4,fontSize:9,color:T.yellow}}>Read-only — your role cannot edit metadata</div>}
           <div style={{fontSize:8,color:T.dim,letterSpacing:"0.18em",marginBottom:12}}>OWNERSHIP</div>
-          <F label="Owner Name" k="owner_name"/>
-          <F label="Wallet Reference" k="wallet_reference"/>
+          <MetadataField label="Owner Name" k="owner_name" data={data} setData={setData} canEdit={canEdit}/>
+          <MetadataField label="Wallet Reference" k="wallet_reference" data={data} setData={setData} canEdit={canEdit}/>
           <div style={{fontSize:8,color:T.dim,letterSpacing:"0.18em",margin:"16px 0 12px"}}>KYC DETAILS <span style={{color:T.dim,fontWeight:400}}>— all optional</span></div>
           <div style={{display:"flex",flexWrap:"wrap",gap:12}}>
-            <F label="Entity Type" k="entity_type" options={["Individual","Corporate","Trust","Fund","Other"]} half/>
-            <F label="Risk Classification" k="risk_classification" options={["Low","Medium","High","Critical"]} half/>
-            <F label="Jurisdiction / Country" k="jurisdiction" half/>
-            <F label="ID Reference" k="id_reference" half/>
-            <F label="Contact Number" k="contact_number" half/>
-            <F label="Contact Email" k="contact_email" type="email" half/>
-            <F label="Relationship Manager / Introducer" k="relationship_manager"/>
+            <MetadataField label="Entity Type" k="entity_type" options={["Individual","Corporate","Trust","Fund","Other"]} half data={data} setData={setData} canEdit={canEdit}/>
+            <MetadataField label="Risk Classification" k="risk_classification" options={["Low","Medium","High","Critical"]} half data={data} setData={setData} canEdit={canEdit}/>
+            <MetadataField label="Jurisdiction / Country" k="jurisdiction" half data={data} setData={setData} canEdit={canEdit}/>
+            <MetadataField label="ID Reference" k="id_reference" half data={data} setData={setData} canEdit={canEdit}/>
+            <MetadataField label="Contact Number" k="contact_number" half data={data} setData={setData} canEdit={canEdit}/>
+            <MetadataField label="Contact Email" k="contact_email" type="email" half data={data} setData={setData} canEdit={canEdit}/>
+            <MetadataField label="Relationship Manager / Introducer" k="relationship_manager" data={data} setData={setData} canEdit={canEdit}/>
             <div style={{width:"100%",marginBottom:12}}>
               <div style={{fontSize:8.5,color:T.mid,marginBottom:4,letterSpacing:"0.1em"}}>NOTES</div>
               <textarea value={data.notes} onChange={e=>setData(p=>({...p,notes:e.target.value}))} disabled={!canEdit}
@@ -473,7 +507,7 @@ export default function App(){
   const [pwdDone,setPwdDone]=useState(false);
 
   const [addr,setAddr]=useState("");
-  const [keys,setKeys]=useState(()=>ls.get("apiKeys")||{etherscan:""});
+  const [keys,setKeys]=useState(()=>ls.get("apiKeys")||{etherscan:"",solscan:""});
   const [result,setResult]=useState(null);
   const [loading,setLoading]=useState(false);
   const [err,setErr]=useState(null);
@@ -581,7 +615,7 @@ export default function App(){
       if(ch==="BTC"){push("Fetching BTC…");data=await fetchBTC(a,push);}
       else if(ch==="ETH"){push("Fetching ETH…");data=await fetchETH(a,keys.etherscan,push);}
       else if(ch==="TRX"){push("Fetching TRX…");data=await fetchTRX(a,push);}
-      else{push("Fetching SOL…");data=await fetchSOL(a,push);}
+      else{push("Fetching SOL…");data=await fetchSOL(a,push,keys.solscan);}
       push(`${data.txCount} txs · ${data.balance}`);
       push(`${maxHops}-hop traversal…`);
       const hops=await multiHop(a,ch,data.counterparties,maxHops,keys.etherscan,push,(h,n)=>setHopNodes([...n]));
@@ -695,9 +729,30 @@ export default function App(){
         </div>
       </div>
 
-      {showKeys&&<div style={{background:T.surface,borderBottom:`1px solid ${T.border}`,padding:"12px 24px"}}>
-        <div style={{fontSize:8.5,color:T.mid,marginBottom:5}}>Etherscan API Key <span style={{color:T.dim}}>— free at etherscan.io/apis</span></div>
-        <input type="password" value={keys.etherscan||""} onChange={e=>setKeys(p=>({...p,etherscan:e.target.value}))} placeholder="YourApiKeyToken" style={{width:"100%",maxWidth:400,background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 12px",color:keys.etherscan?T.green:T.dim,fontSize:11,fontFamily:T.mono,outline:"none",boxSizing:"border-box"}}/>
+      {showKeys&&<div style={{background:T.surface,borderBottom:`1px solid ${T.border}`,padding:"14px 24px"}}>
+        <div style={{display:"flex",gap:16,flexWrap:"wrap",marginBottom:10}}>
+          <div style={{flex:1,minWidth:220}}>
+            <div style={{fontSize:8.5,color:T.mid,marginBottom:5}}>Etherscan API Key <span style={{color:T.dim}}>— free at etherscan.io/apis · ETH/EVM chains</span></div>
+            <div style={{display:"flex",gap:8}}>
+              <input type="password" value={keys.etherscan||""} onChange={e=>setKeys(p=>({...p,etherscan:e.target.value}))}
+                onKeyDown={e=>{if(e.key==="Enter"){ls.set("apiKeys",keys);setShowKeys(false);}}}
+                placeholder="YourApiKeyToken"
+                style={{flex:1,background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 12px",color:keys.etherscan?T.green:T.dim,fontSize:11,fontFamily:T.mono,outline:"none",boxSizing:"border-box"}}/>
+              <button onClick={()=>{ls.set("apiKeys",keys);setShowKeys(false);}} style={{padding:"7px 14px",borderRadius:4,background:`${T.green}20`,border:`1px solid ${T.green}40`,color:T.green,fontSize:10,fontFamily:T.mono,cursor:"pointer",whiteSpace:"nowrap",letterSpacing:"0.08em"}}>SAVE ↵</button>
+            </div>
+          </div>
+          <div style={{flex:1,minWidth:220}}>
+            <div style={{fontSize:8.5,color:T.mid,marginBottom:5}}>Solscan API Key <span style={{color:T.dim}}>— free at solscan.io · improves SOL data</span></div>
+            <div style={{display:"flex",gap:8}}>
+              <input type="password" value={keys.solscan||""} onChange={e=>setKeys(p=>({...p,solscan:e.target.value}))}
+                onKeyDown={e=>{if(e.key==="Enter"){ls.set("apiKeys",keys);setShowKeys(false);}}}
+                placeholder="Your Solscan API key"
+                style={{flex:1,background:T.bg,border:`1px solid ${T.border}`,borderRadius:4,padding:"7px 12px",color:keys.solscan?T.green:T.dim,fontSize:11,fontFamily:T.mono,outline:"none",boxSizing:"border-box"}}/>
+              <button onClick={()=>{ls.set("apiKeys",keys);setShowKeys(false);}} style={{padding:"7px 14px",borderRadius:4,background:`${T.green}20`,border:`1px solid ${T.green}40`,color:T.green,fontSize:10,fontFamily:T.mono,cursor:"pointer",whiteSpace:"nowrap",letterSpacing:"0.08em"}}>SAVE ↵</button>
+            </div>
+          </div>
+        </div>
+        <div style={{fontSize:8,color:T.dim}}>BTC → Blockstream (no key needed) · ETH → Etherscan → Blockscout · SOL → Solscan → mainnet RPC · TRX → Tronscan → TronGrid</div>
       </div>}
 
       {/* Policy */}
