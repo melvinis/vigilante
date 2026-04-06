@@ -214,8 +214,9 @@ async function _ethBC(addr){
   return{balance:(parseInt(ad.coin_balance||0)/1e18).toFixed(6)+" ETH",txCount:parseInt(ad.transactions_count||0),firstSeen:"Unknown",counterparties:cps,tokenActivity:[],coSpendCount:0,changeAddresses:[],contractLabel:ad.name||null};
 }
 async function _trxTS(addr){
-  const[aR,tR]=await Promise.all([fetch(`https://apilist.tronscanapi.com/api/accountv2?address=${addr}`,{signal:AbortSignal.timeout(8000)}),fetch(`https://apilist.tronscanapi.com/api/transaction?address=${addr}&limit=20&start=0&db_version=1`,{signal:AbortSignal.timeout(8000)})]);
-  if(!aR.ok)throw new Error(`HTTP ${aR.status}`);
+const TRON_KEY=import.meta.env.VITE_TRONSCAN_API_KEY||"";
+const tronHeaders=TRON_KEY?{"TRON-PRO-API-KEY":TRON_KEY}:{};
+const[aR,tR]=await Promise.all([fetch(`https://apilist.tronscanapi.com/api/accountv2?address=${addr}`,{signal:AbortSignal.timeout(8000),headers:tronHeaders}),fetch(`https://apilist.tronscanapi.com/api/transaction?address=${addr}&limit=20&start=0&db_version=1`,{signal:AbortSignal.timeout(8000),headers:tronHeaders})]);  if(!aR.ok)throw new Error(`HTTP ${aR.status}`);
   const ad=await aR.json(),td=tR.ok?await tR.json():{data:[]};
   const txs=td.data||[];const seen=new Set();
   const cps=txs.slice(0,20).map(tx=>{const peer=tx.ownerAddress===addr?tx.toAddress:tx.ownerAddress;if(!peer||seen.has(peer))return null;seen.add(peer);const k=lkp(peer);return{address:peer,amount:((tx.contractData?.amount||0)/1e6).toFixed(4)+" TRX",label:k?.label||"Unknown",cat:k?.cat||"UNKNOWN",knownRisk:k?.risk??null,direction:tx.ownerAddress===addr?"OUT":"IN",hop:0};}).filter(Boolean);
