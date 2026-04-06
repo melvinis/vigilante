@@ -45,7 +45,7 @@ class SB {
     return r.json();
   }
   async upsert(table,data,conflict=""){
-    const q=conflict?`?on_conflict=${encodeURIComponent(conflict)}`:"";
+    const q=conflict?`?on_conflict=${encodeURIComponent(conflict)}`:""; console.log("[UPSERT DEBUG]", table, "conflict=", conflict, "url=", `${this.url}/rest/v1/${table}${q}`);
     const r=await fetch(`${this.url}/rest/v1/${table}${q}`,{method:"POST",headers:this.h({"Prefer":`resolution=merge-duplicates,return=representation`}),body:JSON.stringify(data)});
     if(!r.ok){const e=await r.json();throw new Error(e.message||`Upsert failed: ${table}`);}
     return r.json();
