@@ -45,7 +45,8 @@ class SB {
     return r.json();
   }
   async upsert(table,data,conflict=""){
-    const r=await fetch(`${this.url}/rest/v1/${table}`,{method:"POST",headers:this.h({"Prefer":`resolution=merge-duplicates,return=representation`}),body:JSON.stringify(data)});
+    const q=conflict?`?on_conflict=${conflict}`:"";
+    const r=await fetch(`${this.url}/rest/v1/${table}${q}`,{method:"POST",headers:this.h({"Prefer":`resolution=merge-duplicates,return=representation`}),body:JSON.stringify(data)});
     if(!r.ok){const e=await r.json();throw new Error(e.message||`Upsert failed: ${table}`);}
     return r.json();
   }
